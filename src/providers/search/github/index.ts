@@ -80,7 +80,10 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = new Octokit({ auth: api_key });
+		const octokit = new Octokit({
+			auth: api_key,
+			request: { timeout: 10_000 },
+		});
 
 		const search_request = async () => {
 			try {
@@ -142,7 +145,10 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = new Octokit({ auth: api_key });
+		const octokit = new Octokit({
+			auth: api_key,
+			request: { timeout: 10_000 },
+		});
 
 		const search_request = async () => {
 			try {
@@ -204,7 +210,10 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = new Octokit({ auth: api_key });
+		const octokit = new Octokit({
+			auth: api_key,
+			request: { timeout: 10_000 },
+		});
 
 		const search_request = async () => {
 			try {

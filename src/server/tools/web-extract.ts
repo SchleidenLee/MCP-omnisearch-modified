@@ -206,9 +206,11 @@ export const register_web_extract = (
 			},
 			schema: v.object({
 				url: url_or_urls_schema,
-				provider: v.pipe(
-					v.picklist(available),
-					v.description('Processing provider to use'),
+				provider: v.optional(
+					v.pipe(
+						v.picklist(available),
+						v.description('Processing provider to use (optional, auto-selects best provider)'),
+					),
 				),
 				mode: v.optional(
 					v.pipe(
@@ -248,34 +250,74 @@ export const register_web_extract = (
 			handle_tool_result(
 				'web_extract',
 				async () => {
-					const provider_name = provider as WebExtractProvider;
-					const resolved_mode = mode || default_modes[provider_name];
-					const allowed = valid_modes[provider_name];
+					if (provider) {
+						const provider_name = provider as WebExtractProvider;
+						const resolved_mode = mode || default_modes[provider_name];
+						const allowed = valid_modes[provider_name];
 
-					if (allowed && !allowed.includes(resolved_mode)) {
-						throw new ProviderError(
-							ErrorType.INVALID_INPUT,
-							`Mode "${resolved_mode}" is not valid for provider "${provider}". Valid modes: ${allowed.join(', ')}`,
+						if (allowed && !allowed.includes(resolved_mode)) {
+							throw new ProviderError(
+								ErrorType.INVALID_INPUT,
+								`Mode "${resolved_mode}" is not valid for provider "${provider}". Valid modes: ${allowed.join(', ')}`,
+								'web_extract',
+							);
+						}
+
+						const key = make_key(provider, resolved_mode);
+						const selected = providers.require(
+							key,
 							'web_extract',
+							`Provider "${provider}" with mode "${resolved_mode}" is not available. Check your API keys.`,
 						);
+
+						const startTime = Date.now();
+						try {
+							const result = await selected.process_content(url, extract_depth);
+							get_usage_tracker().recordCall(key, true, Date.now() - startTime);
+							return include_raw_contents ? result : omit_raw_contents(result);
+						} catch (error) {
+							get_usage_tracker().recordCall(key, false, Date.now() - startTime);
+							throw error;
+						}
 					}
 
-					const key = make_key(provider, resolved_mode);
-					const selected = providers.require(
-						key,
-						'web_extract',
-						`Provider "${provider}" with mode "${resolved_mode}" is not available. Check your API keys.`,
+					if (!selector) {
+						throw new Error('web_extract auto-select requires at least one available provider');
+					}
+
+					const candidates = selector.selectWithFallback('processing');
+					if (candidates.length === 0) {
+						throw new Error('No processing providers available');
+					}
+
+					return execute_with_fallback<ProcessingResult>(
+						candidates,
+						async (instance, providerId) => {
+							let resolved_mode = mode;
+							if (!resolved_mode) {
+								for (const p of available) {
+									if (providerId.startsWith(p)) {
+										resolved_mode = default_modes[p];
+										break;
+									}
+								}
+							}
+							if (!resolved_mode) {
+								resolved_mode = 'extract';
+							}
+
+							return (instance as ProcessingProvider).process_content(url, extract_depth);
+						},
+						{
+							category: 'processing',
+							toolName: 'web_extract',
+							registry: get_processing_registry(),
+							cooldownManager: get_cooldown_manager(),
+							usageTracker: get_usage_tracker(),
+							callbackRegistry: get_callback_registry(),
+							getProviderId: (id) => id,
+						},
 					);
-
-					const startTime = Date.now();
-					try {
-						const result = await selected.process_content(url, extract_depth);
-						get_usage_tracker().recordCall(key, true, Date.now() - startTime);
-						return include_raw_contents ? result : omit_raw_contents(result);
-					} catch (error) {
-						get_usage_tracker().recordCall(key, false, Date.now() - startTime);
-						throw error;
-					}
 				},
 				{ large_result_mode },
 			),

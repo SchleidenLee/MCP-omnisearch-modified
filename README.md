@@ -24,8 +24,9 @@ brave (privacy/operators), kagi (quality/operators), exa
 Parameters:
 
 - `query` (string, required): Search query
-- `provider` (string, required): `tavily`, `brave`, `kagi`, `exa`, or
-  `kagi_enrichment`
+- `provider` (string, optional): `tavily`, `brave`, `kagi`, `exa`, or
+  `kagi_enrichment`. If omitted, auto-selects the best available provider
+  based on priority, success rate, and response time.
 - `limit` (number, optional): Maximum number of results (default: 10)
 - `include_domains` (array, optional): Only return results from these
   domains
@@ -43,8 +44,8 @@ kagi_fastgpt (fast ~900ms answers), exa_answer (semantic AI), linkup
 Parameters:
 
 - `query` (string, required): Question or search query
-- `provider` (string, required): `kagi_fastgpt`, `exa_answer`, or
-  `linkup`
+- `provider` (string, optional): `kagi_fastgpt`, `exa_answer`, or
+  `linkup`. If omitted, auto-selects the best available provider.
 - `limit` (number, optional): Maximum number of results (default: 10)
 - `large_result_mode` (string, optional): `file` or `inline`;
   overrides `OMNISEARCH_LARGE_RESULT_MODE` for this request
@@ -189,6 +190,95 @@ For example:
 This flexibility makes it easy to get started with just one or two
 providers and add more as needed.
 
+## ✨ Advanced Features: Priority, Fallback & Load Balancing
+
+MCP Omnisearch supports intelligent provider management through
+environment variables. These features are **configurable after installation**
+via environment variables — no code changes required.
+
+### Auto-Select Provider
+
+When you omit the `provider` parameter in `web_search` or `ai_search`,
+the server automatically selects the best available provider based on:
+
+- **Priority** — lower number = higher preference
+- **Weight** — higher number = more likely to be selected
+- **Success rate** — tracks recent call success/failure
+- **Cooldown status** — temporarily disables failed providers
+
+### Fallback Mechanism
+
+If the selected provider fails, the server automatically tries the next
+best provider. Failed providers can enter a **cooldown period** to prevent
+repeated failures:
+
+- **Rate limited (429)** → 60 second cooldown
+- **Server error (5xx)** → 30 second cooldown
+- **Quota exceeded** → Monthly cooldown (until the 1st of next month)
+
+### Callback Hooks
+
+When `ENABLE_CALLBACKS=true`, external listeners can monitor provider
+events: `before_call`, `after_call`, `error`, `cooldown_enter`, `cooldown_exit`.
+
+### Configurable via Environment Variables
+
+All advanced features are controlled by environment variables:
+
+- `API_PRIORITY_CONFIG`: JSON string defining provider priorities per category
+- `COOLDOWN_CONFIG`: JSON string defining per-provider cooldown behavior
+- `WEIGHT_CONFIG`: JSON string defining provider weights
+- `ENABLE_CALLBACKS`: Set to `true` to enable callback event emission
+
+**If these variables are not set, defaults are used** (priority 5, weight 1, no special cooldown).
+
+#### Example: Priority Configuration
+
+Set `API_PRIORITY_CONFIG` to prefer Exa over Tavily for web search:
+
+```bash
+API_PRIORITY_CONFIG='{"search":{"exa":1,"tavily":2,"brave":3},"ai_response":{"linkup":1,"exa_answer":2,"kagi_fastgpt":3}}'
+```
+
+Lower number = higher priority. Default priority is 5.
+
+#### Example: Cooldown Configuration
+
+Set `COOLDOWN_CONFIG` to use monthly cooldown for providers with limited
+free tiers:
+
+```bash
+COOLDOWN_CONFIG='{"tavily":{"type":"monthly"},"exa":{"type":"monthly"}}'
+```
+
+Supported types:
+- `"type": "monthly"` — cooldown until the 1st of next month
+- `"type": "fixed", "duration_ms": 60000` — fixed cooldown for N milliseconds
+
+Default: quota exceeded errors trigger monthly cooldown automatically.
+
+#### Example: Weight Configuration
+
+Set `WEIGHT_CONFIG` to prefer Exa with higher weight:
+
+```bash
+WEIGHT_CONFIG='{"exa":5,"tavily":3,"brave":1}'
+```
+
+Higher weight = more likely to be selected in weighted random mode. Default weight is 1.
+
+### Debug Endpoint
+
+Check provider status, cooldown state, and call statistics via the
+MCP resource:
+
+```
+omnisearch://status/providers
+```
+
+Returns JSON with cooldown status, success rates, response times, and
+callback registration count.
+
 ## Configuration
 
 This server requires configuration through your MCP client. Here are
@@ -263,6 +353,10 @@ API keys will be activated:
   `file` (default) writes temp-file pointers, `inline` returns full
   content so MCP clients can handle indexing, truncation, or offload
   themselves.
+- `API_PRIORITY_CONFIG`: JSON string for provider priority configuration
+- `COOLDOWN_CONFIG`: JSON string for per-provider cooldown behavior
+- `WEIGHT_CONFIG`: JSON string for provider weight configuration
+- `ENABLE_CALLBACKS`: Set to `true` to enable callback event hooks
 
 You can start with just one or two API keys and add more later as
 needed. The server will log which providers are available on startup.

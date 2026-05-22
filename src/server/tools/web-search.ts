@@ -1,7 +1,7 @@
 import { McpServer } from 'tmcp';
 import type { GenericSchema } from 'valibot';
 import * as v from 'valibot';
-import { SearchProvider } from '../../common/types.js';
+import { SearchProvider, BaseSearchParams, SearchResult } from '../../common/types.js';
 import { ProviderRegistry } from '../provider-registry.js';
 import { handle_tool_result } from './responses.js';
 import {
@@ -12,13 +12,21 @@ import {
 	query_schema,
 } from './schemas.js';
 
-// Concrete provider imports
 import { config } from '../../config/env.js';
 import { KagiEnrichmentSearchProvider } from '../../providers/enhancement/kagi-enrichment/index.js';
 import { BraveSearchProvider } from '../../providers/search/brave/index.js';
 import { ExaSearchProvider } from '../../providers/search/exa/index.js';
 import { KagiSearchProvider } from '../../providers/search/kagi/index.js';
 import { TavilySearchProvider } from '../../providers/search/tavily/index.js';
+import { get_provider_priority, get_provider_weight } from '../../config/provider-config.js';
+import { execute_with_fallback } from '../provider-fallback-executor.js';
+import {
+	get_cooldown_manager,
+	get_usage_tracker,
+	get_callback_registry,
+	get_search_registry,
+} from '../global-provider-services.js';
+import { ProviderSelector } from '../provider-selector.js';
 
 export type WebSearchProviderName =
 	| 'tavily'
@@ -28,71 +36,75 @@ export type WebSearchProviderName =
 	| 'kagi_enrichment';
 
 const providers = new ProviderRegistry<SearchProvider>();
+let selector: ProviderSelector | null = null;
 
 export const initialize_web_search = (): boolean => {
 	providers.clear();
-	providers.register({
-		id: 'tavily',
-		name: 'tavily',
-		category: 'search',
-		api_key_name: 'TAVILY_API_KEY',
-		tools: ['web_search'],
-		capabilities: [
-			'web_search',
-			'domain_filters',
-			'operator_translation',
-		],
-		api_key: config.search.tavily.api_key,
-		create: () => new TavilySearchProvider(),
-	});
-	providers.register({
-		id: 'brave',
-		name: 'brave',
-		category: 'search',
-		api_key_name: 'BRAVE_API_KEY',
-		tools: ['web_search'],
-		capabilities: [
-			'web_search',
-			'domain_filters',
-			'operator_passthrough',
-		],
-		api_key: config.search.brave.api_key,
-		create: () => new BraveSearchProvider(),
-	});
-	providers.register({
-		id: 'kagi',
-		name: 'kagi',
-		category: 'search',
-		api_key_name: 'KAGI_API_KEY',
-		tools: ['web_search'],
-		capabilities: [
-			'web_search',
-			'domain_filters',
-			'operator_passthrough',
-		],
-		api_key: config.search.kagi.api_key,
-		create: () => new KagiSearchProvider(),
-	});
-	providers.register({
-		id: 'exa',
-		name: 'exa',
-		category: 'search',
-		api_key_name: 'EXA_API_KEY',
-		tools: ['web_search'],
-		capabilities: ['web_search', 'domain_filters', 'semantic_search'],
-		api_key: config.search.exa.api_key,
-		create: () => new ExaSearchProvider(),
-	});
-	providers.register({
-		id: 'kagi_enrichment',
-		name: 'kagi_enrichment',
-		category: 'search',
-		api_key_name: 'KAGI_API_KEY',
-		tools: ['web_search'],
-		capabilities: ['specialized_indexes', 'web_enrichment'],
-		api_key: config.enhancement.kagi_enrichment.api_key,
-		create: () => new KagiEnrichmentSearchProvider(),
-	});
+	selector = null;
+
+	const registerProvider = (
+		id: WebSearchProviderName,
+		ProviderClass: new () => SearchProvider,
+		capabilities: string[],
+	) => {
+		const api_key_map: Record<string, string | undefined> = {
+			tavily: config.search.tavily.api_key,
+			brave: config.search.brave.api_key,
+			kagi: config.search.kagi.api_key,
+			exa: config.search.exa.api_key,
+			kagi_enrichment: config.enhancement.kagi_enrichment.api_key,
+		};
+
+		const definition = {
+			id,
+			name: id,
+			category: 'search' as const,
+			api_key_name: id === 'kagi_enrichment' ? 'KAGI_API_KEY' : `${id.toUpperCase()}_API_KEY`,
+			tools: ['web_search'] as const,
+			capabilities,
+			api_key: api_key_map[id],
+			create: () => new ProviderClass(),
+			priority: get_provider_priority('search', id),
+			weight: get_provider_weight(id),
+		};
+
+		providers.register(definition);
+		search_registry.register(definition);
+	};
+
+	const search_registry = get_search_registry();
+	search_registry.clear();
+
+	registerProvider('tavily', TavilySearchProvider, [
+		'web_search',
+		'domain_filters',
+		'operator_translation',
+	]);
+	registerProvider('brave', BraveSearchProvider, [
+		'web_search',
+		'domain_filters',
+		'operator_passthrough',
+	]);
+	registerProvider('kagi', KagiSearchProvider, [
+		'web_search',
+		'domain_filters',
+		'operator_passthrough',
+	]);
+	registerProvider('exa', ExaSearchProvider, [
+		'web_search',
+		'domain_filters',
+		'semantic_search',
+	]);
+	registerProvider('kagi_enrichment', KagiEnrichmentSearchProvider, [
+		'specialized_indexes',
+		'web_enrichment',
+	]);
+
+	selector = new ProviderSelector(
+		search_registry,
+		get_usage_tracker(),
+		get_cooldown_manager(),
+	);
 
 	return providers.size > 0;
 };
@@ -122,9 +134,11 @@ export const register_web_search = (
 			},
 			schema: v.object({
 				query: query_schema,
-				provider: v.pipe(
-					v.picklist(provider_names),
-					v.description('Search provider to use'),
+				provider: v.optional(
+					v.pipe(
+						v.picklist(provider_names),
+						v.description('Search provider to use (optional, auto-selects best provider)'),
+					),
 				),
 				limit: limit_schema,
 				include_domains: include_domains_schema,
@@ -143,14 +157,51 @@ export const register_web_search = (
 			handle_tool_result(
 				'web_search',
 				async () => {
-					const selected = providers.require(provider, 'web_search');
+					if (!selector) {
+						const selected = providers.require(provider!, 'web_search');
+						return selected.search({
+							query,
+							limit,
+							include_domains,
+							exclude_domains,
+						});
+					}
 
-					return selected.search({
+					if (provider) {
+						const selected = providers.require(provider, 'web_search');
+						return selected.search({
+							query,
+							limit,
+							include_domains,
+							exclude_domains,
+						});
+					}
+
+					const candidates = selector.selectWithFallback('search');
+					if (candidates.length === 0) {
+						throw new Error('No search providers available');
+					}
+
+					const params: BaseSearchParams = {
 						query,
 						limit,
 						include_domains,
 						exclude_domains,
-					});
+					};
+
+					return execute_with_fallback<SearchResult[]>(
+						candidates,
+						async (instance) => (instance as SearchProvider).search(params),
+						{
+							category: 'search',
+							toolName: 'web_search',
+							registry: get_search_registry(),
+							cooldownManager: get_cooldown_manager(),
+							usageTracker: get_usage_tracker(),
+							callbackRegistry: get_callback_registry(),
+							getProviderId: (id) => id,
+						},
+					);
 				},
 				{ large_result_mode },
 			),

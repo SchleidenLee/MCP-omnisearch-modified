@@ -5,6 +5,7 @@ import type {
 	ProviderStatus,
 } from './provider-registry.js';
 import { provider_status_entries } from './tools/index.js';
+import { setup_debug_endpoints } from './debug-endpoints.js';
 
 const categories: ProviderCategory[] = [
 	'search',
@@ -74,6 +75,8 @@ const aggregate_provider_info = (
 
 export const setup_handlers = (server: McpServer<GenericSchema>) => {
 	// Provider Status Resource
+	setup_debug_endpoints(server);
+
 	server.resource(
 		{
 			name: 'provider-status',

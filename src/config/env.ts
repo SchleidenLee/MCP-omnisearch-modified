@@ -124,6 +124,12 @@ export const config = {
 	},
 };
 
+// Provider priority, cooldown, and weight configuration (JSON strings)
+export const API_PRIORITY_CONFIG = process.env.API_PRIORITY_CONFIG;
+export const COOLDOWN_CONFIG = process.env.COOLDOWN_CONFIG;
+export const WEIGHT_CONFIG = process.env.WEIGHT_CONFIG;
+export const ENABLE_CALLBACKS = process.env.ENABLE_CALLBACKS === 'true';
+
 // Validate required environment variables
 export const validate_config = () => {
 	const missing_keys: string[] = [];

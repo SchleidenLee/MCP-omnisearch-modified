@@ -6,6 +6,11 @@ export type ProviderCategory =
 	| 'ai_response'
 	| 'processing';
 
+export interface CooldownConfig {
+	type: 'fixed' | 'monthly';
+	duration_ms?: number;
+}
+
 export interface ProviderDefinition<T> {
 	id: string;
 	name: string;
@@ -17,6 +22,10 @@ export interface ProviderDefinition<T> {
 	tools?: readonly string[];
 	modes?: readonly string[];
 	capabilities?: readonly string[];
+	priority?: number;
+	weight?: number;
+	cooldown_config?: CooldownConfig;
+	max_retries?: number;
 }
 
 export interface ProviderStatus {

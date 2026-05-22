@@ -83,7 +83,7 @@ describe('setup_handlers', () => {
 
 		expect(
 			resources.map((resource) => resource.definition.name),
-		).toEqual(['provider-status', 'provider-info']);
+		).toEqual(['Provider Status', 'provider-status', 'provider-info']);
 
 		const provider_status_resource = resources.find(
 			(resource) => resource.definition.name === 'provider-status',

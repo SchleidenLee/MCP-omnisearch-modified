@@ -10,6 +10,13 @@ import {
 	limit_schema,
 	query_schema,
 } from './schemas.js';
+import { get_provider_weight } from '../../config/provider-config.js';
+import {
+	get_cooldown_manager,
+	get_usage_tracker,
+	get_callback_registry,
+	get_search_registry,
+} from '../global-provider-services.js';
 
 const providers = new ProviderRegistry<GitHubSearchProvider>();
 
@@ -25,7 +32,17 @@ export const initialize_github_search = (): boolean => {
 		capabilities: ['code_search', 'repository_search', 'user_search'],
 		api_key: config.search.github.api_key,
 		create: () => new GitHubSearchProvider(),
+		weight: get_provider_weight('github'),
 	});
+
+	const search_registry = get_search_registry();
+	const github_entry = providers.entries()[0];
+	if (github_entry) {
+		const existing = search_registry.entries().find((e) => e.id === 'github');
+		if (!existing) {
+			search_registry.register(github_entry);
+		}
+	}
 
 	return providers.size > 0;
 };
@@ -84,23 +101,26 @@ export const register_github_search = (
 						'github_search',
 					);
 
-					switch (search_type) {
-						case 'code':
-							return selected.search_code({
-								query,
-								limit,
-							});
-						case 'repositories':
-							return selected.search_repositories({
-								query,
-								limit,
-								sort,
-							});
-						case 'users':
-							return selected.search_users({
-								query,
-								limit,
-							});
+					const startTime = Date.now();
+					try {
+						let result: unknown;
+						switch (search_type) {
+							case 'code':
+								result = await selected.search_code({ query, limit });
+								break;
+							case 'repositories':
+								result = await selected.search_repositories({ query, limit, sort });
+								break;
+							case 'users':
+								result = await selected.search_users({ query, limit });
+								break;
+						}
+
+						get_usage_tracker().recordCall('github', true, Date.now() - startTime);
+						return result;
+					} catch (error) {
+						get_usage_tracker().recordCall('github', false, Date.now() - startTime);
+						throw error;
 					}
 				},
 				{ large_result_mode },

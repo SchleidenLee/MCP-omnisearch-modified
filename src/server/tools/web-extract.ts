@@ -6,6 +6,7 @@ import {
 	ErrorType,
 	ProcessingProvider,
 	ProviderError,
+	ProcessingResult,
 } from '../../common/types.js';
 import { config } from '../../config/env.js';
 import { ProviderRegistry } from '../provider-registry.js';
@@ -16,7 +17,6 @@ import {
 	url_or_urls_schema,
 } from './schemas.js';
 
-// Concrete provider imports
 import { ExaContentsProvider } from '../../providers/processing/exa-contents/index.js';
 import { ExaSimilarProvider } from '../../providers/processing/exa-similar/index.js';
 import { FirecrawlActionsProvider } from '../../providers/processing/firecrawl-actions/index.js';
@@ -26,6 +26,15 @@ import { FirecrawlMapProvider } from '../../providers/processing/firecrawl-map/i
 import { FirecrawlScrapeProvider } from '../../providers/processing/firecrawl-scrape/index.js';
 import { KagiSummarizerProvider } from '../../providers/processing/kagi-summarizer/index.js';
 import { TavilyExtractProvider } from '../../providers/processing/tavily-extract/index.js';
+import { get_provider_priority, get_provider_weight } from '../../config/provider-config.js';
+import { execute_with_fallback } from '../provider-fallback-executor.js';
+import {
+	get_cooldown_manager,
+	get_usage_tracker,
+	get_callback_registry,
+	get_processing_registry,
+} from '../global-provider-services.js';
+import { ProviderSelector } from '../provider-selector.js';
 
 export type WebExtractProvider =
 	| 'tavily'
@@ -43,103 +52,117 @@ export type WebExtractMode =
 	| 'contents'
 	| 'similar';
 
-// Provider key combines provider + mode
 type ProviderKey = string;
 
 const providers = new ProviderRegistry<ProcessingProvider>();
+let selector: ProviderSelector | null = null;
 
 const make_key = (provider: string, mode: string): ProviderKey =>
 	`${provider}:${mode}`;
 
 export const initialize_web_extract = (): boolean => {
 	providers.clear();
-	providers.register({
-		id: make_key('tavily', 'extract'),
-		name: 'tavily',
-		category: 'processing',
-		api_key: config.processing.tavily_extract.api_key,
-		api_key_name: 'TAVILY_API_KEY',
-		tools: ['web_extract'],
-		modes: ['extract'],
-		capabilities: ['content_extraction', 'raw_contents'],
-		create: () => new TavilyExtractProvider(),
-	});
-	providers.register({
-		id: make_key('kagi', 'summarize'),
-		name: 'kagi',
-		category: 'processing',
-		api_key: config.processing.kagi_summarizer.api_key,
-		api_key_name: 'KAGI_API_KEY',
-		tools: ['web_extract'],
-		modes: ['summarize'],
-		capabilities: ['summarization'],
-		create: () => new KagiSummarizerProvider(),
-	});
+	selector = null;
+
+	const processing_registry = get_processing_registry();
+	processing_registry.clear();
+
+	const registerProvider = (
+		id: string,
+		name: string,
+		api_key: string | undefined,
+		api_key_name: string,
+		modes: readonly string[],
+		capabilities: readonly string[],
+		create: () => ProcessingProvider,
+		priorityKey?: string,
+		weightKey?: string,
+	) => {
+		const definition = {
+			id,
+			name,
+			category: 'processing' as const,
+			api_key,
+			api_key_name,
+			tools: ['web_extract'] as const,
+			modes,
+			capabilities,
+			create,
+			priority: priorityKey ? get_provider_priority('processing', priorityKey) : undefined,
+			weight: weightKey ? get_provider_weight(weightKey) : undefined,
+		};
+
+		providers.register(definition);
+		processing_registry.register(definition);
+	};
+
+	registerProvider(
+		make_key('tavily', 'extract'),
+		'tavily',
+		config.processing.tavily_extract.api_key,
+		'TAVILY_API_KEY',
+		['extract'],
+		['content_extraction', 'raw_contents'],
+		() => new TavilyExtractProvider(),
+		'tavily',
+		'tavily',
+	);
+	registerProvider(
+		make_key('kagi', 'summarize'),
+		'kagi',
+		config.processing.kagi_summarizer.api_key,
+		'KAGI_API_KEY',
+		['summarize'],
+		['summarization'],
+		() => new KagiSummarizerProvider(),
+		'kagi',
+		'kagi',
+	);
 
 	const firecrawl_modes: Array<{
 		mode: WebExtractMode;
 		capabilities: readonly string[];
 		create: () => ProcessingProvider;
 	}> = [
-		{
-			mode: 'scrape',
-			capabilities: ['scraping'],
-			create: () => new FirecrawlScrapeProvider(),
-		},
-		{
-			mode: 'crawl',
-			capabilities: ['crawling'],
-			create: () => new FirecrawlCrawlProvider(),
-		},
-		{
-			mode: 'map',
-			capabilities: ['site_mapping'],
-			create: () => new FirecrawlMapProvider(),
-		},
-		{
-			mode: 'extract',
-			capabilities: ['structured_extraction'],
-			create: () => new FirecrawlExtractProvider(),
-		},
-		{
-			mode: 'actions',
-			capabilities: ['browser_actions'],
-			create: () => new FirecrawlActionsProvider(),
-		},
+		{ mode: 'scrape', capabilities: ['scraping'], create: () => new FirecrawlScrapeProvider() },
+		{ mode: 'crawl', capabilities: ['crawling'], create: () => new FirecrawlCrawlProvider() },
+		{ mode: 'map', capabilities: ['site_mapping'], create: () => new FirecrawlMapProvider() },
+		{ mode: 'extract', capabilities: ['structured_extraction'], create: () => new FirecrawlExtractProvider() },
+		{ mode: 'actions', capabilities: ['browser_actions'], create: () => new FirecrawlActionsProvider() },
 	];
 	for (const { mode, capabilities, create } of firecrawl_modes) {
-		providers.register({
-			id: make_key('firecrawl', mode),
-			name: 'firecrawl',
-			category: 'processing',
-			api_key: config.processing.firecrawl_scrape.api_key,
-			api_key_name: 'FIRECRAWL_API_KEY',
-			tools: ['web_extract'],
-			modes: [mode],
+		registerProvider(
+			make_key('firecrawl', mode),
+			'firecrawl',
+			config.processing.firecrawl_scrape.api_key,
+			'FIRECRAWL_API_KEY',
+			[mode],
 			capabilities,
 			create,
-		});
+			'firecrawl',
+			'firecrawl',
+		);
 	}
 
 	for (const mode of ['contents', 'similar'] as const) {
-		providers.register({
-			id: make_key('exa', mode),
-			name: 'exa',
-			category: 'processing',
-			api_key: config.processing.exa_contents.api_key,
-			api_key_name: 'EXA_API_KEY',
-			tools: ['web_extract'],
-			modes: [mode],
-			capabilities:
-				mode === 'contents'
-					? ['content_retrieval']
-					: ['similar_pages'],
-			create: () =>
-				mode === 'contents'
-					? new ExaContentsProvider()
-					: new ExaSimilarProvider(),
-		});
+		registerProvider(
+			make_key('exa', mode),
+			'exa',
+			config.processing.exa_contents.api_key,
+			'EXA_API_KEY',
+			[mode],
+			mode === 'contents' ? ['content_retrieval'] : ['similar_pages'],
+			() => mode === 'contents' ? new ExaContentsProvider() : new ExaSimilarProvider(),
+			'exa',
+			'exa',
+		);
 	}
+
+	selector = new ProviderSelector(
+		processing_registry,
+		get_usage_tracker(),
+		get_cooldown_manager(),
+	);
 
 	return providers.size > 0;
 };
@@ -149,7 +172,6 @@ export const get_available_providers = () => providers.names();
 export const get_provider_status_entries = () =>
 	providers.status_entries();
 
-// Default modes per provider
 const default_modes: Record<WebExtractProvider, WebExtractMode> = {
 	tavily: 'extract',
 	kagi: 'summarize',
@@ -157,7 +179,6 @@ const default_modes: Record<WebExtractProvider, WebExtractMode> = {
 	exa: 'contents',
 };
 
-// Valid modes per provider
 const valid_modes: Record<WebExtractProvider, WebExtractMode[]> = {
 	tavily: ['extract'],
 	kagi: ['summarize'],
@@ -246,14 +267,15 @@ export const register_web_extract = (
 						`Provider "${provider}" with mode "${resolved_mode}" is not available. Check your API keys.`,
 					);
 
-					const result = await selected.process_content(
-						url,
-						extract_depth,
-					);
-
-					return include_raw_contents
-						? result
-						: omit_raw_contents(result);
+					const startTime = Date.now();
+					try {
+						const result = await selected.process_content(url, extract_depth);
+						get_usage_tracker().recordCall(key, true, Date.now() - startTime);
+						return include_raw_contents ? result : omit_raw_contents(result);
+					} catch (error) {
+						get_usage_tracker().recordCall(key, false, Date.now() - startTime);
+						throw error;
+					}
 				},
 				{ large_result_mode },
 			),

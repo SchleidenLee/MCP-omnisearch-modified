@@ -1,4 +1,4 @@
-import { Octokit, type RequestRequestOptions } from 'octokit';
+import { Octokit } from 'octokit';
 import { retry_with_backoff } from '../../../common/retry.js';
 import {
 	BaseSearchParams,
@@ -9,10 +9,10 @@ import {
 } from '../../../common/types.js';
 import { validate_api_key } from '../../../common/validation.js';
 import { config } from '../../../config/env.js';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-// Proxy support — reads standard proxy env vars and passes them to Octokit
-// via a custom fetch that uses ProxyAgent from Node.js built-in undici.
-async function get_octokit_request_options(): Promise<RequestRequestOptions> {
+// Initialize proxy globally — called once when this module loads
+function init_proxy(): void {
 	const proxyUrl =
 		process.env.https_proxy ||
 		process.env.HTTPS_PROXY ||
@@ -21,34 +21,23 @@ async function get_octokit_request_options(): Promise<RequestRequestOptions> {
 		process.env.all_proxy ||
 		process.env.ALL_PROXY;
 
-	if (!proxyUrl) {
-		return { timeout: 10_000 };
-	}
+	if (!proxyUrl) return;
 
-	let ProxyAgent: typeof import('undici').ProxyAgent | undefined;
 	try {
-		ProxyAgent = (await import('undici')).ProxyAgent;
+		const agent = new ProxyAgent(proxyUrl);
+		setGlobalDispatcher(agent);
 	} catch {
-		// undici not available, fall back to default fetch
-		return { timeout: 10_000 };
+		// Proxy setup failed, continue without proxy
 	}
-
-	const agent = new ProxyAgent(proxyUrl);
-	return {
-		timeout: 10_000,
-		fetch: ((...args: Parameters<typeof fetch>) =>
-			fetch(...args, {
-				// @ts-expect-error dispatcher is supported in Node.js 22+
-				dispatcher: agent,
-			})) as typeof fetch,
-	};
 }
 
-async function create_octokit(
-	api_key: string,
-): Promise<Octokit> {
-	const request = await get_octokit_request_options();
-	return new Octokit({ auth: api_key, request });
+init_proxy();
+
+function create_octokit(api_key: string): Octokit {
+	return new Octokit({
+		auth: api_key,
+		request: { timeout: 10_000 },
+	});
 }
 
 // Interface for individual code search result item from GitHub API
@@ -121,7 +110,7 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = await create_octokit(api_key);
+		const octokit = create_octokit(api_key);
 
 		const search_request = async () => {
 			try {
@@ -183,7 +172,7 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = await create_octokit(api_key);
+		const octokit = create_octokit(api_key);
 
 		const search_request = async () => {
 			try {
@@ -245,7 +234,7 @@ export class GitHubSearchProvider implements SearchProvider {
 			config.search.github.api_key,
 			this.name,
 		);
-		const octokit = await create_octokit(api_key);
+		const octokit = create_octokit(api_key);
 
 		const search_request = async () => {
 			try {
